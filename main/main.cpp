@@ -91,22 +91,59 @@ static VMBOOL is_txt_name(const VMWCHAR *name)
 static void refresh_notes(void)
 {
     VMWCHAR pattern[260];
+    VMWCHAR previously_selected[MAX_FILENAME];
     vm_fileinfo_ext info;
     VMINT find_handle;
+    VMINT old_selected = g_selected;
+    VMBOOL have_previous = VM_FALSE;
+
+    /* Refreshing the directory must not reset the user's browser selection. */
+    previously_selected[0] = 0;
+    if (g_note_count > 0 && g_selected >= 0 && g_selected < g_note_count) {
+        vm_wstrncpy(previously_selected, g_notes[g_selected].name, MAX_FILENAME - 1);
+        previously_selected[MAX_FILENAME - 1] = 0;
+        have_previous = VM_TRUE;
+    }
+
     g_note_count = 0;
-    g_selected = 0;
-    g_scroll = 0;
     build_search_pattern(pattern);
     find_handle = vm_find_first_ext(pattern, &info);
-    if (find_handle < 0) return;
-    do {
-        if ((info.attributes & VM_FS_ATTR_DIR) == 0 && is_txt_name(info.filefullname) && g_note_count < MAX_NOTES) {
-            vm_wstrncpy(g_notes[g_note_count].name, info.filefullname, MAX_FILENAME - 1);
-            g_notes[g_note_count].name[MAX_FILENAME - 1] = 0;
-            g_note_count++;
+    if (find_handle >= 0) {
+        do {
+            if ((info.attributes & VM_FS_ATTR_DIR) == 0 && is_txt_name(info.filefullname) && g_note_count < MAX_NOTES) {
+                vm_wstrncpy(g_notes[g_note_count].name, info.filefullname, MAX_FILENAME - 1);
+                g_notes[g_note_count].name[MAX_FILENAME - 1] = 0;
+                g_note_count++;
+            }
+        } while (vm_find_next_ext(find_handle, &info) == 0);
+        vm_find_close_ext(find_handle);
+    }
+
+    if (g_note_count <= 0) {
+        g_selected = 0;
+        g_scroll = 0;
+        return;
+    }
+
+    /* Prefer the same filename even if directory enumeration order changed. */
+    if (have_previous) {
+        VMINT i;
+        VMBOOL found = VM_FALSE;
+        for (i = 0; i < g_note_count; i++) {
+            if (vm_wstrcmp(g_notes[i].name, previously_selected) == 0) {
+                g_selected = i;
+                found = VM_TRUE;
+                break;
+            }
         }
-    } while (vm_find_next_ext(find_handle, &info) == 0);
-    vm_find_close_ext(find_handle);
+        if (!found) g_selected = old_selected;
+    }
+    if (g_selected < 0) g_selected = 0;
+    if (g_selected >= g_note_count) g_selected = g_note_count - 1;
+    if (g_selected < g_scroll) g_scroll = g_selected;
+    if (g_visible_rows > 0 && g_selected >= g_scroll + g_visible_rows)
+        g_scroll = g_selected - g_visible_rows + 1;
+    if (g_scroll < 0) g_scroll = 0;
 }
 
 static void draw_text(VMINT x, VMINT y, VMWSTR text, vm_graphic_color color)
