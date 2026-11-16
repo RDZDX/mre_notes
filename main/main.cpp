@@ -3,7 +3,8 @@
 #include "vmgraph.h"
 #include "vmchset.h"
 #include "vmstdlib.h"
-//wq#include "vminput.h"
+#include "vmeditor.h"
+#include "vminput.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,10 +14,10 @@
 #define MAX_FILENAME    96
 #define MAX_NOTE_CHARS  4096
 #define MAX_NOTE_BYTES  (64 * 1024)
+#define EDITOR_BUFFER_BYTES ((MAX_NOTE_CHARS + 1) * sizeof(VMWCHAR))
 
 typedef enum { UI_BROWSER, UI_MENU, UI_DELETE_CONFIRM } UiMode;
 typedef enum { INPUT_NONE, INPUT_NEW_NAME, INPUT_RENAME } InputAction;
-
 typedef struct { VMWCHAR name[MAX_FILENAME]; } NoteEntry;
 
 static VMINT g_layer = -1;
@@ -24,12 +25,27 @@ static VMINT g_screen_w, g_screen_h, g_font_h, g_header_h, g_footer_h;
 static VMINT g_selected, g_scroll, g_note_count, g_visible_rows;
 static UiMode g_ui = UI_BROWSER;
 static InputAction g_input_action = INPUT_NONE;
-/* Keep the popup cursor separate from the file-browser selection. */
 static VMINT g_menu_selected = 0;
 static NoteEntry g_notes[MAX_NOTES];
 static VMWCHAR g_current_path[260];
 static VMWCHAR g_folder[128];
 static VMWCHAR g_status[96];
+
+/* The editor widget owns the note-editing UI; this buffer remains alive
+ * until the widget is closed. */
+static VMINT32 g_editor = -1;
+static VMWCHAR *g_editor_buffer = NULL;
+static VMINT g_editor_buffer_bytes = 0;
+static VMINT g_editor_text_len = 0;
+static VMBOOL g_editor_suspended = VM_FALSE;
+static VMWCHAR g_edit_title[MAX_FILENAME];
+static vm_editor_font_attribute g_editor_font = {0, 0, 0, 18};
+static vm_input_mode_enum g_editor_input_modes[] = {
+    VM_INPUT_MODE_MULTITAP_FIRST_UPPERCASE_ABC,
+    VM_INPUT_MODE_123,
+    VM_INPUT_MODE_123_SYMBOLS,
+    VM_INPUT_MODE_NONE
+};
 
 static void refresh_notes(void);
 static void open_selected_note(void);
@@ -38,12 +54,18 @@ static void start_editor(void);
 static void render_screen(void);
 static void draw_ascii(VMINT x, VMINT y, const char *text, vm_graphic_color color);
 static void filename_input_cb(VMINT state, VMWSTR text);
-static void editor_input_cb(VMINT state, VMWSTR text);
 static void rename_input_cb(VMINT state, VMWSTR text);
 static void delete_selected_note(void);
 static void handle_key(VMINT event, VMINT keycode);
 static void handle_pen(VMINT event, VMINT x, VMINT y);
 static void handle_sysevt(VMINT message, VMINT param);
+static void update_scroll(void);
+static void close_editor(VMBOOL save);
+static void save_editor_cb(void);
+static void back_editor_cb(void);
+static void editor_center_cb(void);
+static VMUINT32 editor_ime_cb(VMINT32 handle, vm_editor_message_struct_p message);
+static void editor_text_changed_cb(VMUINT8 *text, VMUINT8 *cursor, VMINT32 text_length);
 
 static VMINT ascii_to_ucs2_const(VMWSTR dst, VMINT size, const char *src)
 {
@@ -90,21 +112,17 @@ static VMBOOL is_txt_name(const VMWCHAR *name)
 
 static void refresh_notes(void)
 {
-    VMWCHAR pattern[260];
-    VMWCHAR previously_selected[MAX_FILENAME];
+    VMWCHAR pattern[260], previously_selected[MAX_FILENAME];
     vm_fileinfo_ext info;
-    VMINT find_handle;
-    VMINT old_selected = g_selected;
+    VMINT find_handle, old_selected = g_selected;
     VMBOOL have_previous = VM_FALSE;
 
-    /* Refreshing the directory must not reset the user's browser selection. */
     previously_selected[0] = 0;
     if (g_note_count > 0 && g_selected >= 0 && g_selected < g_note_count) {
         vm_wstrncpy(previously_selected, g_notes[g_selected].name, MAX_FILENAME - 1);
         previously_selected[MAX_FILENAME - 1] = 0;
         have_previous = VM_TRUE;
     }
-
     g_note_count = 0;
     build_search_pattern(pattern);
     find_handle = vm_find_first_ext(pattern, &info);
@@ -118,22 +136,13 @@ static void refresh_notes(void)
         } while (vm_find_next_ext(find_handle, &info) == 0);
         vm_find_close_ext(find_handle);
     }
-
-    if (g_note_count <= 0) {
-        g_selected = 0;
-        g_scroll = 0;
-        return;
-    }
-
-    /* Prefer the same filename even if directory enumeration order changed. */
+    if (g_note_count <= 0) { g_selected = 0; g_scroll = 0; return; }
     if (have_previous) {
         VMINT i;
         VMBOOL found = VM_FALSE;
         for (i = 0; i < g_note_count; i++) {
             if (vm_wstrcmp(g_notes[i].name, previously_selected) == 0) {
-                g_selected = i;
-                found = VM_TRUE;
-                break;
+                g_selected = i; found = VM_TRUE; break;
             }
         }
         if (!found) g_selected = old_selected;
@@ -213,7 +222,6 @@ static void render_screen(void)
                            idx == g_selected ? text : muted);
         }
     }
-
     vm_graphic_setcolor(&header);
     vm_graphic_fill_rect_ex(g_layer, 0, footer_y, g_screen_w, g_footer_h);
     draw_ascii(8, footer_y + 3, g_ui == UI_BROWSER ? "Options" : "Select", text);
@@ -222,7 +230,7 @@ static void render_screen(void)
         ascii_to_ucs2_const(w_exit, sizeof(w_exit), g_ui == UI_BROWSER ? "Exit" : "Back");
         draw_text(g_screen_w - vm_graphic_get_string_width(w_exit) - 8, footer_y + 3, w_exit, text);
     }
-    if (g_status[0]) draw_text(6, g_header_h - 2, g_status, accent);
+    /* Status text is intentionally not painted over the note list. */
 
     if (g_ui == UI_MENU || g_ui == UI_DELETE_CONFIRM) {
         VMINT pw = g_screen_w - 28;
@@ -262,35 +270,29 @@ static void update_scroll(void)
     if (g_scroll < 0) g_scroll = 0;
 }
 
-static VMINT read_note_as_ucs2(VMWSTR path, VMWSTR *out_text)
+/* Read a bounded UTF-8 note into a UCS-2 buffer suitable for vm_editor. */
+static VMINT read_note_as_ucs2(VMWSTR path, VMWSTR out_text, VMINT out_bytes)
 {
     VMFILE file;
     VMUINT size = 0, nread = 0;
     VMCHAR *utf8;
-    VMWCHAR *wide;
-    VMINT wide_bytes;
     file = vm_file_open(path, MODE_READ, VM_FALSE);
     if (file < 0) return -1;
     if (vm_file_getfilesize(file, &size) != 0 || size > MAX_NOTE_BYTES) { vm_file_close(file); return -2; }
     utf8 = (VMCHAR *)vm_malloc(size + 1);
-    wide_bytes = (VMINT)((size + 1) * sizeof(VMWCHAR));
-    wide = (VMWCHAR *)vm_malloc(wide_bytes);
-    if (!utf8 || !wide) {
-        if (utf8) vm_free(utf8);
-        if (wide) vm_free(wide);
-        vm_file_close(file);
-        return -3;
-    }
+    if (!utf8) { vm_file_close(file); return -3; }
     if (size > 0 && vm_file_read(file, utf8, size, &nread) < 0) {
-        vm_free(utf8); vm_free(wide); vm_file_close(file); return -4;
+        vm_free(utf8); vm_file_close(file); return -4;
     }
     vm_file_close(file);
     utf8[nread] = 0;
-    memset(wide, 0, wide_bytes);
-    if (nread > 0) vm_chset_convert(VM_CHSET_UTF8, VM_CHSET_UCS2, utf8, (VMCHAR *)wide, wide_bytes);
-    wide[MAX_NOTE_CHARS] = 0;
+    memset(out_text, 0, out_bytes);
+    if (nread > 0 && vm_chset_convert(VM_CHSET_UTF8, VM_CHSET_UCS2, utf8,
+                                      (VMCHAR *)out_text, out_bytes) != VM_CHSET_CONVERT_SUCCESS) {
+        vm_free(utf8); return -5;
+    }
+    out_text[MAX_NOTE_CHARS] = 0;
     vm_free(utf8);
-    *out_text = wide;
     return 0;
 }
 
@@ -301,11 +303,12 @@ static VMINT save_note(VMWSTR path, VMWSTR text)
     VMCHAR *utf8;
     VMUINT written = 0;
     if (chars > MAX_NOTE_CHARS) chars = MAX_NOTE_CHARS;
-    out_bytes = (chars * 3) + 8;
+    out_bytes = chars * 3 + 8;
     utf8 = (VMCHAR *)vm_malloc(out_bytes);
     if (!utf8) return -1;
     memset(utf8, 0, out_bytes);
-    if (chars > 0 && vm_chset_convert(VM_CHSET_UCS2, VM_CHSET_UTF8, (VMCHAR *)text, utf8, out_bytes) != 0) {
+    if (chars > 0 && vm_chset_convert(VM_CHSET_UCS2, VM_CHSET_UTF8,
+                                      (VMCHAR *)text, utf8, out_bytes) != VM_CHSET_CONVERT_SUCCESS) {
         vm_free(utf8); return -2;
     }
     file = vm_file_open(path, MODE_CREATE_ALWAYS_WRITE, VM_FALSE);
@@ -318,27 +321,112 @@ static VMINT save_note(VMWSTR path, VMWSTR text)
     return 0;
 }
 
+static VMUINT32 editor_ime_cb(VMINT32 handle, vm_editor_message_struct_p message)
+{
+    (void)handle;
+    (void)message;
+    return 0;
+}
+
+static void editor_text_changed_cb(VMUINT8 *text, VMUINT8 *cursor, VMINT32 text_length)
+{
+    (void)text;
+    (void)cursor;
+    if (text_length < 0) text_length = 0;
+    if (text_length > MAX_NOTE_CHARS) text_length = MAX_NOTE_CHARS;
+    g_editor_text_len = text_length;
+}
+
+static void editor_center_cb(void)
+{
+    /* Center softkey is deliberately a no-op; left saves and right returns. */
+}
+
+static void close_editor(VMBOOL save)
+{
+    VMINT save_result = 0;
+    if (g_editor < 0) return;
+    if (save && g_editor_buffer) {
+        vm_editor_get_text(g_editor, g_editor_buffer, g_editor_buffer_bytes);
+        g_editor_text_len = vm_wstrlen(g_editor_buffer);
+        if (g_editor_text_len > MAX_NOTE_CHARS) {
+            g_editor_text_len = MAX_NOTE_CHARS;
+            g_editor_buffer[g_editor_text_len] = 0;
+        }
+        save_result = save_note(g_current_path, g_editor_buffer);
+    }
+    vm_editor_deactivate(g_editor);
+    vm_editor_close(g_editor);
+    g_editor = -1;
+    g_editor_suspended = VM_FALSE;
+    if (g_editor_buffer) { vm_free(g_editor_buffer); g_editor_buffer = NULL; }
+    g_editor_buffer_bytes = 0;
+    g_editor_text_len = 0;
+    if (save) {
+        if (save_result == 0) set_status("Saved");
+        else set_status("Save failed");
+        if (save_result == 0) refresh_notes();
+    }
+    g_current_path[0] = 0;
+    g_ui = UI_BROWSER;
+    render_screen();
+}
+
+static void save_editor_cb(void) { close_editor(VM_TRUE); }
+static void back_editor_cb(void) { close_editor(VM_FALSE); }
+
 static void start_editor(void)
 {
-    VMWCHAR *text = NULL;
     VMINT rc;
+    VMWCHAR left_label[16], center_label[16], right_label[16];
     if (g_current_path[0] == 0) return;
-    rc = read_note_as_ucs2(g_current_path, &text);
-    if (rc < 0) {
-        text = (VMWCHAR *)vm_malloc(sizeof(VMWCHAR));
-        if (!text) { set_status("Not enough memory"); render_screen(); return; }
-        text[0] = 0;
+    if (g_editor >= 0) return;
+    g_editor_buffer_bytes = EDITOR_BUFFER_BYTES;
+    g_editor_buffer = (VMWCHAR *)vm_malloc(g_editor_buffer_bytes);
+    if (!g_editor_buffer) {
+        g_editor_buffer_bytes = 0;
+        set_status("Not enough memory");
+        render_screen();
+        return;
     }
-    vm_input_set_editor_title(g_note_count > 0 ? g_notes[g_selected].name : (VMWSTR)g_folder);
-    rc = vm_input_text3(text, MAX_NOTE_CHARS, VM_INPUT_METHOD_ALPHABETIC, editor_input_cb);
-    vm_free(text);
-    if (rc < 0) { set_status("Could not open editor"); render_screen(); }
+    memset(g_editor_buffer, 0, g_editor_buffer_bytes);
+    rc = read_note_as_ucs2(g_current_path, g_editor_buffer, g_editor_buffer_bytes);
+    if (rc < 0 && rc != -1) {
+        vm_free(g_editor_buffer); g_editor_buffer = NULL; g_editor_buffer_bytes = 0;
+        set_status("Could not read note"); render_screen(); return;
+    }
+
+    g_editor_text_len = vm_wstrlen(g_editor_buffer);
+    g_editor = vm_editor_create(VM_EDITOR_MULTILINE, 0, 0, g_screen_w,
+                                g_screen_h - vm_editor_get_softkey_height(),
+                                g_editor_buffer, g_editor_buffer_bytes,
+                                VM_FALSE, g_layer);
+    if (g_editor <= 0) {
+        g_editor = -1;
+        vm_free(g_editor_buffer); g_editor_buffer = NULL; g_editor_buffer_bytes = 0;
+        set_status("Could not create editor"); render_screen(); return;
+    }
+    vm_editor_set_multiline_text_font(g_editor, g_editor_font);
+    vm_editor_set_IME(g_editor, VM_INPUT_TYPE_SENTENCE, g_editor_input_modes,
+                      VM_INPUT_MODE_MULTITAP_FIRST_UPPERCASE_ABC, editor_ime_cb);
+    vm_editor_set_update_text_callback(g_editor, editor_text_changed_cb);
+    ascii_to_ucs2_const(left_label, sizeof(left_label), "Save");
+    ascii_to_ucs2_const(center_label, sizeof(center_label), "");
+    ascii_to_ucs2_const(right_label, sizeof(right_label), "Back");
+    vm_editor_set_softkey(g_editor, left_label, VM_LEFT_SOFTKEY, save_editor_cb);
+    vm_editor_set_softkey(g_editor, center_label, VM_CENTER_SOFTKEY, editor_center_cb);
+    vm_editor_set_softkey(g_editor, right_label, VM_RIGHT_SOFTKEY, back_editor_cb);
+    vm_editor_activate(g_editor, VM_TRUE);
+    vm_editor_show(g_editor);
+    vm_editor_redraw_ime_screen();
 }
 
 static void open_selected_note(void)
 {
     if (g_note_count <= 0) return;
     build_note_path(g_current_path, g_notes[g_selected].name);
+    vm_wstrncpy(g_edit_title, g_notes[g_selected].name, MAX_FILENAME - 1);
+    g_edit_title[MAX_FILENAME - 1] = 0;
     start_editor();
 }
 
@@ -369,7 +457,7 @@ static void start_new_note(void)
 {
     VMWCHAR empty[1] = { 0 };
     g_input_action = INPUT_NEW_NAME;
-    vm_input_set_editor_title((VMWSTR)empty);
+    vm_input_set_editor_title(empty);
     if (vm_input_text3(empty, MAX_FILENAME - 1, VM_INPUT_METHOD_ALPHABETIC, filename_input_cb) < 0) {
         g_input_action = INPUT_NONE;
         set_status("Could not open name entry");
@@ -393,19 +481,10 @@ static void filename_input_cb(VMINT state, VMWSTR text)
         g_input_action = INPUT_NONE; render_screen(); return;
     }
     vm_wstrcpy(g_current_path, path);
+    vm_wstrncpy(g_edit_title, name, MAX_FILENAME - 1);
+    g_edit_title[MAX_FILENAME - 1] = 0;
     g_input_action = INPUT_NONE;
     start_editor();
-}
-
-static void editor_input_cb(VMINT state, VMWSTR text)
-{
-    if (state == VM_INPUT_OK && text) {
-        if (save_note(g_current_path, text) < 0) set_status("Could not save note");
-        else set_status("Saved");
-        refresh_notes();
-    }
-    g_current_path[0] = 0;
-    render_screen();
 }
 
 static void rename_input_cb(VMINT state, VMWSTR text)
@@ -468,6 +547,7 @@ static void activate_menu_item(void)
 static void handle_key(VMINT event, VMINT keycode)
 {
     if (event != VM_KEY_EVENT_DOWN && event != VM_KEY_EVENT_REPEAT) return;
+    if (g_editor >= 0) return; /* vm_editor receives editor input itself */
     if (g_ui == UI_DELETE_CONFIRM) {
         if (keycode == VM_KEY_OK || keycode == VM_KEY_LEFT_SOFTKEY) delete_selected_note();
         else if (keycode == VM_KEY_RIGHT_SOFTKEY || keycode == VM_KEY_CLEAR || keycode == VM_KEY_BACK) {
@@ -503,7 +583,7 @@ static void handle_key(VMINT event, VMINT keycode)
 static void handle_pen(VMINT event, VMINT x, VMINT y)
 {
     VMINT row_h = g_font_h + 5;
-    if (event != VM_PEN_EVENT_TAP) return;
+    if (event != VM_PEN_EVENT_TAP || g_editor >= 0) return;
     if (y >= g_screen_h - g_footer_h) {
         handle_key(VM_KEY_EVENT_DOWN, x < g_screen_w / 2 ? VM_KEY_LEFT_SOFTKEY : VM_KEY_RIGHT_SOFTKEY);
         return;
@@ -548,10 +628,37 @@ static void handle_sysevt(VMINT message, VMINT param)
         if (g_note_count == 0) start_new_note();
         break;
     case VM_MSG_ACTIVE:
+        if (g_editor >= 0 && g_editor_suspended) {
+            g_editor_suspended = VM_FALSE;
+            vm_editor_activate(g_editor, VM_TRUE);
+            vm_editor_show(g_editor);
+            vm_editor_redraw_ime_screen();
+        } else if (g_layer >= 0) {
+            vm_graphic_active_layer(g_layer);
+            if (g_editor >= 0) { vm_editor_show(g_editor); vm_editor_redraw_ime_screen(); }
+            else render_screen();
+        }
+        break;
     case VM_MSG_PAINT:
-        if (g_layer >= 0) { vm_graphic_active_layer(g_layer); render_screen(); }
+        if (g_editor >= 0) {
+            vm_editor_show(g_editor);
+            vm_editor_redraw_ime_screen();
+        } else render_screen();
+        break;
+    case VM_MSG_INACTIVE:
+        if (g_editor >= 0) {
+            vm_editor_save(g_editor);
+            vm_editor_deactivate(g_editor);
+            g_editor_suspended = VM_TRUE;
+        }
         break;
     case VM_MSG_QUIT:
+        if (g_editor >= 0) {
+            vm_editor_deactivate(g_editor);
+            vm_editor_close(g_editor);
+            g_editor = -1;
+        }
+        if (g_editor_buffer) { vm_free(g_editor_buffer); g_editor_buffer = NULL; }
         if (g_layer >= 0) vm_graphic_delete_layer(g_layer);
         g_layer = -1;
         break;
