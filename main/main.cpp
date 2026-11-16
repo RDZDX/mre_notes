@@ -14,39 +14,22 @@
 #define MAX_NOTE_CHARS  4096
 #define MAX_NOTE_BYTES  (64 * 1024)
 
-#define C_BG            VM_COLOR_BLACK
-#define C_HEADER        VM_COLOR_DARK_GREY
-#define C_TEXT          VM_COLOR_WHITE
-#define C_SELECTED      VM_COLOR_BLUE
-#define C_ACCENT        VM_COLOR_GREEN
-#define C_POPUP         VM_COLOR_DARK_GREY
-
-/* Browser UI layout intentionally follows the list/selection/softkey pattern
- * from abook.cpp, while text input and UTF-8 conversion follow mre_editor. */
 typedef enum { UI_BROWSER, UI_MENU, UI_DELETE_CONFIRM } UiMode;
 typedef enum { INPUT_NONE, INPUT_NEW_NAME, INPUT_RENAME } InputAction;
 
-typedef struct {
-    VMWCHAR name[MAX_FILENAME];
-} NoteEntry;
+typedef struct { VMWCHAR name[MAX_FILENAME]; } NoteEntry;
 
 static VMINT g_layer = -1;
-static VMINT g_screen_w;
-static VMINT g_screen_h;
-static VMINT g_font_h;
-static VMINT g_header_h;
-static VMINT g_footer_h;
-static VMINT g_selected;
-static VMINT g_scroll;
-static VMINT g_note_count;
-static VMINT g_visible_rows;
+static VMINT g_screen_w, g_screen_h, g_font_h, g_header_h, g_footer_h;
+static VMINT g_selected, g_scroll, g_note_count, g_visible_rows;
 static UiMode g_ui = UI_BROWSER;
 static InputAction g_input_action = INPUT_NONE;
+/* Keep the popup cursor separate from the file-browser selection. */
+static VMINT g_menu_selected = 0;
 static NoteEntry g_notes[MAX_NOTES];
 static VMWCHAR g_current_path[260];
 static VMWCHAR g_folder[128];
 static VMWCHAR g_status[96];
-static VMBOOL g_startup_empty = VM_FALSE;
 
 static void refresh_notes(void);
 static void open_selected_note(void);
@@ -62,24 +45,10 @@ static void handle_key(VMINT event, VMINT keycode);
 static void handle_pen(VMINT event, VMINT x, VMINT y);
 static void handle_sysevt(VMINT message, VMINT param);
 
-//static VMINT ascii_to_ucs2_const(VMWSTR dst, VMINT size, const char *src)
-//{
-//    return vm_ascii_to_ucs2(
-//        dst,
-//        size,
-//        const_cast(VMSTR)(src ? src : ""));
-//}
-
 static VMINT ascii_to_ucs2_const(VMWSTR dst, VMINT size, const char *src)
 {
-    if (dst == NULL || size <= 0)
-        return -1;
-
-    return vm_ascii_to_ucs2(
-        dst,
-        size,
-        (VMSTR)(src ? src : "")
-    );
+    if (!dst || size <= 0) return -1;
+    return vm_ascii_to_ucs2(dst, size, (VMSTR)(src ? src : ""));
 }
 
 static vm_graphic_color rgb(VMUINT8 r, VMUINT8 g, VMUINT8 b)
@@ -92,19 +61,16 @@ static vm_graphic_color rgb(VMUINT8 r, VMUINT8 g, VMUINT8 b)
 
 static void set_status(const char *message)
 {
-//    vm_ascii_to_ucs2(g_status, sizeof(g_status), message ? message : "");
     ascii_to_ucs2_const(g_status, sizeof(g_status), message);
 }
 
 static void build_search_pattern(VMWSTR out)
 {
-    //vm_ascii_to_ucs2(out, 260 * sizeof(VMWCHAR), NOTES_DIR "\\*.*");
     ascii_to_ucs2_const(out, 260 * sizeof(VMWCHAR), NOTES_DIR "\\*.*");
 }
 
 static void build_note_path(VMWSTR out, const VMWCHAR *name)
 {
-//    vm_ascii_to_ucs2(out, 260 * sizeof(VMWCHAR), NOTES_DIR "\\");
     ascii_to_ucs2_const(out, 260 * sizeof(VMWCHAR), NOTES_DIR "\\");
     vm_wstrcat(out, (VMWSTR)name);
 }
@@ -133,14 +99,11 @@ static void refresh_notes(void)
     build_search_pattern(pattern);
     find_handle = vm_find_first_ext(pattern, &info);
     if (find_handle < 0) return;
-
     do {
-        if ((info.attributes & VM_FS_ATTR_DIR) == 0 && is_txt_name(info.filefullname)) {
-            if (g_note_count < MAX_NOTES) {
-                vm_wstrncpy(g_notes[g_note_count].name, info.filefullname, MAX_FILENAME - 1);
-                g_notes[g_note_count].name[MAX_FILENAME - 1] = 0;
-                g_note_count++;
-            }
+        if ((info.attributes & VM_FS_ATTR_DIR) == 0 && is_txt_name(info.filefullname) && g_note_count < MAX_NOTES) {
+            vm_wstrncpy(g_notes[g_note_count].name, info.filefullname, MAX_FILENAME - 1);
+            g_notes[g_note_count].name[MAX_FILENAME - 1] = 0;
+            g_note_count++;
         }
     } while (vm_find_next_ext(find_handle, &info) == 0);
     vm_find_close_ext(find_handle);
@@ -155,7 +118,6 @@ static void draw_text(VMINT x, VMINT y, VMWSTR text, vm_graphic_color color)
 static void draw_ascii(VMINT x, VMINT y, const char *text, vm_graphic_color color)
 {
     VMWCHAR wide[128];
-//    vm_ascii_to_ucs2(wide, sizeof(wide), (VMSTR)text);
     ascii_to_ucs2_const(wide, sizeof(wide), text);
     draw_text(x, y, wide, color);
 }
@@ -163,8 +125,7 @@ static void draw_ascii(VMINT x, VMINT y, const char *text, vm_graphic_color colo
 static void draw_truncated(VMINT x, VMINT y, VMWSTR text, VMINT max_width, vm_graphic_color color)
 {
     VMWCHAR tmp[MAX_FILENAME];
-    VMINT len = vm_wstrlen(text);
-    VMINT width;
+    VMINT len = vm_wstrlen(text), width;
     if (len >= MAX_FILENAME) len = MAX_FILENAME - 1;
     if (len <= 0 || max_width <= 0) return;
     vm_wstrncpy(tmp, text, len);
@@ -180,15 +141,11 @@ static void draw_truncated(VMINT x, VMINT y, VMWSTR text, VMINT max_width, vm_gr
 static void render_screen(void)
 {
     VMINT i, row_h, body_h, footer_y;
-    vm_graphic_color bg = rgb(18, 20, 26);
-    vm_graphic_color header = rgb(34, 39, 50);
-    vm_graphic_color text = rgb(225, 229, 238);
-    vm_graphic_color selected = rgb(36, 90, 150);
-    vm_graphic_color accent = rgb(80, 220, 150);
-    vm_graphic_color popup = rgb(30, 34, 44);
+    vm_graphic_color bg = rgb(18, 20, 26), header = rgb(34, 39, 50);
+    vm_graphic_color text = rgb(225, 229, 238), selected = rgb(36, 90, 150);
+    vm_graphic_color accent = rgb(80, 220, 150), popup = rgb(30, 34, 44);
     vm_graphic_color muted = rgb(150, 160, 176);
     char title[40];
-
     if (g_layer < 0) return;
     vm_graphic_active_layer(g_layer);
     vm_graphic_set_font(VM_SMALL_FONT);
@@ -204,14 +161,12 @@ static void render_screen(void)
     body_h = footer_y - g_header_h;
     g_visible_rows = body_h > 0 ? body_h / row_h : 1;
     if (g_visible_rows < 1) g_visible_rows = 1;
-
     if (g_note_count == 0) {
         draw_ascii(8, g_header_h + 12, "No notes found.", muted);
         draw_ascii(8, g_header_h + 12 + row_h, "Choose Options > Create new.", muted);
     } else {
         for (i = 0; i < g_visible_rows; i++) {
-            VMINT idx = g_scroll + i;
-            VMINT y = g_header_h + i * row_h;
+            VMINT idx = g_scroll + i, y = g_header_h + i * row_h;
             if (idx >= g_note_count) break;
             if (idx == g_selected) {
                 vm_graphic_setcolor(&selected);
@@ -227,7 +182,6 @@ static void render_screen(void)
     draw_ascii(8, footer_y + 3, g_ui == UI_BROWSER ? "Options" : "Select", text);
     {
         VMWCHAR w_exit[16];
-//        vm_ascii_to_ucs2(w_exit, sizeof(w_exit), g_ui == UI_BROWSER ? "Exit" : "Back");
         ascii_to_ucs2_const(w_exit, sizeof(w_exit), g_ui == UI_BROWSER ? "Exit" : "Back");
         draw_text(g_screen_w - vm_graphic_get_string_width(w_exit) - 8, footer_y + 3, w_exit, text);
     }
@@ -236,8 +190,7 @@ static void render_screen(void)
     if (g_ui == UI_MENU || g_ui == UI_DELETE_CONFIRM) {
         VMINT pw = g_screen_w - 28;
         VMINT ph = g_ui == UI_MENU ? (g_font_h + 8) * 3 + 12 : g_font_h * 3 + 24;
-        VMINT px = 14;
-        VMINT py = (g_screen_h - ph) / 2;
+        VMINT px = 14, py = (g_screen_h - ph) / 2;
         vm_graphic_setcolor(&popup);
         vm_graphic_fill_rect_ex(g_layer, px, py, pw, ph);
         vm_graphic_setcolor(&accent);
@@ -246,7 +199,7 @@ static void render_screen(void)
             const char *items[] = { "Create new", "Rename", "Delete" };
             for (i = 0; i < 3; i++) {
                 VMINT y = py + 6 + i * (g_font_h + 8);
-                if (i == g_selected) {
+                if (i == g_menu_selected) {
                     vm_graphic_setcolor(&selected);
                     vm_graphic_fill_rect_ex(g_layer, px + 4, y - 2, pw - 8, g_font_h + 6);
                 }
@@ -281,10 +234,7 @@ static VMINT read_note_as_ucs2(VMWSTR path, VMWSTR *out_text)
     VMINT wide_bytes;
     file = vm_file_open(path, MODE_READ, VM_FALSE);
     if (file < 0) return -1;
-    if (vm_file_getfilesize(file, &size) != 0 || size > MAX_NOTE_BYTES) {
-        vm_file_close(file);
-        return -2;
-    }
+    if (vm_file_getfilesize(file, &size) != 0 || size > MAX_NOTE_BYTES) { vm_file_close(file); return -2; }
     utf8 = (VMCHAR *)vm_malloc(size + 1);
     wide_bytes = (VMINT)((size + 1) * sizeof(VMWCHAR));
     wide = (VMWCHAR *)vm_malloc(wide_bytes);
@@ -310,17 +260,16 @@ static VMINT read_note_as_ucs2(VMWSTR path, VMWSTR *out_text)
 static VMINT save_note(VMWSTR path, VMWSTR text)
 {
     VMFILE file;
-    VMINT chars = vm_wstrlen(text);
-    VMINT out_bytes = (chars * 3) + 8;
+    VMINT chars = vm_wstrlen(text), out_bytes;
     VMCHAR *utf8;
     VMUINT written = 0;
     if (chars > MAX_NOTE_CHARS) chars = MAX_NOTE_CHARS;
+    out_bytes = (chars * 3) + 8;
     utf8 = (VMCHAR *)vm_malloc(out_bytes);
     if (!utf8) return -1;
     memset(utf8, 0, out_bytes);
     if (chars > 0 && vm_chset_convert(VM_CHSET_UCS2, VM_CHSET_UTF8, (VMCHAR *)text, utf8, out_bytes) != 0) {
-        vm_free(utf8);
-        return -2;
+        vm_free(utf8); return -2;
     }
     file = vm_file_open(path, MODE_CREATE_ALWAYS_WRITE, VM_FALSE);
     if (file < 0) { vm_free(utf8); return -3; }
@@ -343,8 +292,7 @@ static void start_editor(void)
         if (!text) { set_status("Not enough memory"); render_screen(); return; }
         text[0] = 0;
     }
-    g_input_action = INPUT_NONE;
-    vm_input_set_editor_title(g_notes[g_selected].name);
+    vm_input_set_editor_title(g_note_count > 0 ? g_notes[g_selected].name : (VMWSTR)g_folder);
     rc = vm_input_text3(text, MAX_NOTE_CHARS, VM_INPUT_METHOD_ALPHABETIC, editor_input_cb);
     vm_free(text);
     if (rc < 0) { set_status("Could not open editor"); render_screen(); }
@@ -375,7 +323,6 @@ static void append_txt_extension(VMWSTR out, VMWSTR input)
     out[MAX_FILENAME - 5] = 0;
     if (!is_txt_name(out)) {
         VMWCHAR ext[5];
-//        vm_ascii_to_ucs2(ext, sizeof(ext), ".txt");
         ascii_to_ucs2_const(ext, sizeof(ext), ".txt");
         vm_wstrcat(out, ext);
     }
@@ -395,13 +342,10 @@ static void start_new_note(void)
 
 static void filename_input_cb(VMINT state, VMWSTR text)
 {
-    VMWCHAR name[MAX_FILENAME];
-    VMWCHAR path[260];
+    VMWCHAR name[MAX_FILENAME], path[260];
     VMFILE existing;
     if (state != VM_INPUT_OK || !text || !valid_note_name(text)) {
-        g_input_action = INPUT_NONE;
-        render_screen();
-        return;
+        g_input_action = INPUT_NONE; render_screen(); return;
     }
     append_txt_extension(name, text);
     build_note_path(path, name);
@@ -409,9 +353,7 @@ static void filename_input_cb(VMINT state, VMWSTR text)
     if (existing >= 0) {
         vm_file_close(existing);
         set_status("That note name already exists");
-        g_input_action = INPUT_NONE;
-        render_screen();
-        return;
+        g_input_action = INPUT_NONE; render_screen(); return;
     }
     vm_wstrcpy(g_current_path, path);
     g_input_action = INPUT_NONE;
@@ -431,8 +373,7 @@ static void editor_input_cb(VMINT state, VMWSTR text)
 
 static void rename_input_cb(VMINT state, VMWSTR text)
 {
-    VMWCHAR name[MAX_FILENAME];
-    VMWCHAR new_path[260];
+    VMWCHAR name[MAX_FILENAME], new_path[260];
     if (state == VM_INPUT_OK && text && valid_note_name(text)) {
         append_txt_extension(name, text);
         build_note_path(new_path, name);
@@ -474,8 +415,9 @@ static void delete_selected_note(void)
 
 static void activate_menu_item(void)
 {
+    VMINT choice = g_menu_selected;
     g_ui = UI_BROWSER;
-    switch (g_selected) {
+    switch (choice) {
     case 0: start_new_note(); return;
     case 1: begin_rename(); return;
     case 2:
@@ -497,17 +439,15 @@ static void handle_key(VMINT event, VMINT keycode)
         return;
     }
     if (g_ui == UI_MENU) {
-        if (keycode == VM_KEY_UP) g_selected = (g_selected + 2) % 3;
-        else if (keycode == VM_KEY_DOWN) g_selected = (g_selected + 1) % 3;
+        if (keycode == VM_KEY_UP) g_menu_selected = (g_menu_selected + 2) % 3;
+        else if (keycode == VM_KEY_DOWN) g_menu_selected = (g_menu_selected + 1) % 3;
         else if (keycode == VM_KEY_OK || keycode == VM_KEY_LEFT_SOFTKEY) activate_menu_item();
-        else if (keycode == VM_KEY_RIGHT_SOFTKEY || keycode == VM_KEY_CLEAR || keycode == VM_KEY_BACK) {
-            g_ui = UI_BROWSER;
-        }
+        else if (keycode == VM_KEY_RIGHT_SOFTKEY || keycode == VM_KEY_CLEAR || keycode == VM_KEY_BACK) g_ui = UI_BROWSER;
         render_screen();
         return;
     }
     if (keycode == VM_KEY_LEFT_SOFTKEY) {
-        g_selected = 0; g_ui = UI_MENU; render_screen(); return;
+        g_menu_selected = 0; g_ui = UI_MENU; render_screen(); return;
     }
     if (keycode == VM_KEY_RIGHT_SOFTKEY || keycode == VM_KEY_BACK || keycode == VM_KEY_CLEAR) {
         vm_exit_app(); return;
@@ -534,7 +474,7 @@ static void handle_pen(VMINT event, VMINT x, VMINT y)
     if (g_ui == UI_MENU) {
         VMINT py = (g_screen_h - ((g_font_h + 8) * 3 + 12)) / 2;
         VMINT row = (y - py - 6) / (g_font_h + 8);
-        if (row >= 0 && row < 3) { g_selected = row; activate_menu_item(); }
+        if (row >= 0 && row < 3) { g_menu_selected = row; activate_menu_item(); }
         return;
     }
     if (g_ui == UI_DELETE_CONFIRM) {
@@ -562,9 +502,8 @@ static void handle_sysevt(VMINT message, VMINT param)
         if (g_font_h <= 0) g_font_h = 14;
         g_header_h = g_font_h + 8;
         g_footer_h = g_font_h + 8;
-//        vm_ascii_to_ucs2(g_folder, sizeof(g_folder), NOTES_DIR);
         ascii_to_ucs2_const(g_folder, sizeof(g_folder), NOTES_DIR);
-        vm_file_mkdir(g_folder); /* succeeds when absent; existing folder is harmless */
+        vm_file_mkdir(g_folder);
         g_layer = vm_graphic_create_layer(0, 0, g_screen_w, g_screen_h, VM_NO_TRANS_COLOR);
         vm_graphic_active_layer(g_layer);
         refresh_notes();
@@ -588,4 +527,3 @@ void vm_main(void)
     vm_reg_keyboard_callback(handle_key);
     vm_reg_pen_callback(handle_pen);
 }
-
