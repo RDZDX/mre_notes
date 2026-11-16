@@ -1,6 +1,0 @@
-; mre_notes.def : MRE module exports
-LIBRARY      "mre_notes"
-DESCRIPTION  'mre_notes MRE application'
-
-EXPORTS
-    vm_entry @1
