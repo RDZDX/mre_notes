@@ -9,6 +9,6 @@ A MediaTek MRE notes app for `E:\Notes`, using the MRE APIs and editor/input con
 - If there are no notes at startup, immediately starts the **Create new** flow.
 - **Options** menu: Create new, Rename, Delete.
 - New notes and renamed notes use `.txt` when the extension is omitted. Note bodies are read and written as UTF-8.
-- Supports keypad navigation and tap selection.
+- Supports keypad navigation only.
 
 ![alt text](https://rdzdx.github.io/mre_notes/picture.jpg)
