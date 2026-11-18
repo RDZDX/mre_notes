@@ -1,6 +1,6 @@
 # mre_notes
 
-A MediaTek MRE notes app for `E:\Notes`, using the MRE APIs and editor/input conventions from [RDZDX/mre_editor](https://github.com/RDZDX/mre_editor), with a selectable file-browser UI patterned after the supplied Стас Дагестанцев (https://github.com/STACORP/abookplayer-vxp).
+A MediaTek MRE notes app for `E:\Notes`, using the MRE APIs and editor/input conventions from [RDZDX/mre_editor](https://github.com/RDZDX/mre_editor), with a selectable file-browser UI patterned after the supplied Стас Дагестанцев [abookplayer-vxp](https://github.com/STACORP/abookplayer-vxp).
 
 ## Features
 
