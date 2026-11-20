@@ -12,6 +12,6 @@ A MediaTek MRE notes app for `E:\Notes`, using the MRE APIs and editor/input con
 - Supports keypad navigation only.
 
 For using with Nokia mobile phone, app must be signed with IMSI (your SIM card) code. https://vxpatch.luxferre.top/
-Application file - "[mre_notes.vxp](https://rdzdx.github.io/mre_notes.vxp/mre_notes.vxp)".
+Application file - "[mre_notes.vxp](https://rdzdx.github.io/mre_notes/mre_notes.vxp)".
 
 ![alt text](https://rdzdx.github.io/mre_notes/picture.jpg)
