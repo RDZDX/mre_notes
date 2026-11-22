@@ -16,3 +16,5 @@ Application files - "[mre_notes.vxp](https://rdzdx.github.io/mre_notes/mre_notes
 "[mre_notes_dark.vxp](https://rdzdx.github.io/mre_notes/mre_notes_dark.vxp)".
 
 ![alt text](https://rdzdx.github.io/mre_notes/picture.jpg)
+
+![alt text](https://rdzdx.github.io/mre_notes/picture1.jpg)
